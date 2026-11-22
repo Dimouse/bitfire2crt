@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0, '/home/claude/work')
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from cpu import CPU, disasm
 
 class C64:

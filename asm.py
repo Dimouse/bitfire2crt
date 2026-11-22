@@ -5,7 +5,7 @@ Expressions: python-evaluated with $hex, %bin, <expr, >expr, labels; '*' = curre
 Use '!zp' suffix not needed: zero page chosen when value < $100 and mode exists.
 """
 import re, sys
-sys.path.insert(0, '/home/claude/work')
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from cpu import OPS
 
 CODE = {}

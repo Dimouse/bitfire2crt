@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0, '/home/claude/work')
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from c64 import C64
 from drive import Drive
 from cpu import disasm

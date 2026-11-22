@@ -3,7 +3,7 @@ Usage: build_crt.py out.crt
 Inputs: dec_mem.pkl (decrunched booter image), harvest_{a,b,c}.pkl
 """
 import sys, pickle, struct
-sys.path.insert(0, '/home/claude/work')
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from asm import assemble
 
 SIDES = ['a', 'b', 'c']

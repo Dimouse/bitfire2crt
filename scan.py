@@ -44,6 +44,9 @@ def collect(args, tmp):
     for k, v in by.items(): groups.append((k, sorted(v)))
     return groups
 
+def bn(p):
+    return re.sub(r'^\d+_', '', os.path.basename(p))
+
 def static_info(path):
     d = D64(path)
     info = {'size': len(d.d), 'files': 0, 'file_blocks': 0}
@@ -80,13 +83,19 @@ def scan_group(name, paths, args, log):
         return rep
     infos = [(p, static_info(p)) for p in paths]
     bfs = [(i['bitfire'][0], p, i['bitfire'][1]) for p, i in infos if i['bitfire']]
+    other = [p for p, i in infos if not i['bitfire']]
     rep['raw'] = sum(i['raw'] for _, i in infos)
     rep['files'] = sum(i['files'] for _, i in infos)
     rep['words'] = sorted({w for _, i in infos for w in i['words']})
-    # boot side: Bitfire side $F0 if present, else first disk
+    rep['notes'] = []
+    if bfs and other:
+        rep['notes'].append('не Bitfire (отдельные программы?): ' + ', '.join(os.path.basename(p) for p in other))
+    # variants: several disks with the same side id
+    sides = {}
+    for sid, p, e in sorted(bfs, key=lambda x: (x[0], len(os.path.basename(x[1])), x[1])):
+        sides.setdefault(sid, []).append((sid, p, e))
     if bfs:
-        bfs.sort()
-        boot_path = bfs[0][1]
+        boot_path = sides[min(sides)][0][1]
     else:
         boot_path = paths[0]
     t0 = time.time()
@@ -95,7 +104,7 @@ def scan_group(name, paths, args, log):
     if getattr(r, 'error', None):
         rep['verdict'] = '❓'; rep['why'] = r.error; return rep
     rep['boot'] = r.boot_name.decode('latin-1', 'replace')
-    rep['notes'] = list(r.notes)
+    rep['notes'] += list(r.notes)
     if r.result[0] == 'kernal':
         rep['notes'].append('эмуляция остановилась на вызове KERNAL $%04X' % r.result[1])
     elif r.result[0] == 'maxc':
@@ -105,8 +114,7 @@ def scan_group(name, paths, args, log):
     if r.loads:
         rep['notes'].append('KERNAL LOAD: ' + ', '.join((n.decode('latin-1') or '?') for n, a in r.loads[:6]))
     if not r.drive_used:
-        trackmo = rep['raw'] > 40
-        if trackmo:
+        if rep['raw'] > 40:
             rep['verdict'] = '❓'
             rep['why'] = ('много секторов вне файлов (%d), но код в дисковод в эмуляции не заливался — '
                           'нестандартный старт или защита' % rep['raw'])
@@ -114,7 +122,7 @@ def scan_group(name, paths, args, log):
             rep['verdict'] = 'ℹ️'
             rep['why'] = 'своего кода в дисководе не видно, файлы обычные' + \
                          (' — одну сторону KFF обычно грузит и так' if len(paths) == 1 else
-                          ' — но сторон %d, нужен переход между дисками' % len(paths))
+                          ' — но дисков %d' % len(paths))
         return rep
     fp = BF.drive_fingerprint(r)
     rep['drive_fp'] = fp
@@ -127,42 +135,90 @@ def scan_group(name, paths, args, log):
     except ValueError as ex:
         rep['verdict'] = '🟡'; rep['why'] = 'Bitfire, но ' + ex.args[0]
         return rep
-    ids = [b[0] for b in bfs]
+    # sides: group by id, alternatives (e.g. digimax variants) become separate CRTs
+    byid = {}
+    for sid, p, ents in bfs: byid.setdefault(sid, []).append((p, ents))
+    ids = sorted(byid)
     if ids != list(range(0xf0, 0xf0 + len(ids))):
         rep['verdict'] = '🟡'; rep['why'] = 'Bitfire совместимый, но стороны не подряд: ' + ' '.join('$%02X' % x for x in ids)
         return rep
-    if len(ids) > 3:
-        rep['verdict'] = '🟡'; rep['why'] = 'Bitfire совместимый, но сторон больше 3'; return rep
-    total = sum(n for b in bfs for _, n in b[2])
+    if len(ids) > 4:
+        rep['verdict'] = '🟡'; rep['why'] = 'Bitfire совместимый, но сторон больше 4'; return rep
+    for sid in ids:
+        byid[sid].sort(key=lambda t: (len(os.path.basename(t[0])), t[0]))
+        if len(byid[sid]) > 1:
+            rep['notes'].append('сторона $%02X в вариантах: %s — будет CRT на каждый' % (
+                sid, ', '.join(bn(p) for p, _ in byid[sid])))
+        if not byid[sid][0][1]:
+            rep['notes'].append('сторона $%02X без файлов Bitfire (%s)' % (sid, bn(byid[sid][0][0])))
+    variants = [[]]
+    for sid in ids:
+        if len(byid[sid]) == 1: variants = [v + [(sid,) + byid[sid][0]] for v in variants]
+        else: variants = [v + [(sid,) + alt] for v in variants for alt in byid[sid]]
+    variants = variants[:4]
+    main = variants[0]
+    total = sum(n for _, _, ents in main for _, n in ents)
     if total > 63 * 16384 - 0x200:
         rep['verdict'] = '🟡'; rep['why'] = 'данные (%d КБ) не влезают в 1 МБ' % (total // 1024); return rep
     if not r.demo_started:
         rep['notes'].append('бутер в эмуляции не дошёл до первой части')
+    pr = a['prof']
     rep['verdict'] = '✅'
-    rep['why'] = 'Bitfire, совместимая сборка: %d сторон, %d файлов, %d КБ' % (
-        len(bfs), sum(len(b[2]) for b in bfs), total // 1024)
+    rep['why'] = 'Bitfire (резидент: send $%04X, poll $%04X, указатель $%02X): %d сторон, %d файлов, %d КБ' % (
+        pr['send'], pr['poll'], pr['src'], len(ids), sum(len(e) for _, _, e in main), total // 1024)
     if args.convert:
         if not r.demo_started:
             rep['verdict'] = '🟡'; rep['why'] += '; конвертация пропущена (не найден старт демки)'; return rep
         import conv
-        t0 = time.time()
-        log('  снимаю файлы со сторон…')
+        t0 = time.time(); crts = []; fails = []
+        uniq = []
+        for var in variants:
+            for t in var:
+                if t[1] not in [u[1] for u in uniq]: uniq.append(t)
+        uniq.sort(key=lambda t: (t[1] != boot_path, t[0]))
         try:
-            files = BF.harvest(bfs, r, log=log)
-            fbs = [(sid, files[sid]) for sid, _, _ in bfs]
-            os.makedirs(args.out, exist_ok=True)
-            out = os.path.join(args.out, re.sub(r'[\\/:*?"<>|]', '_', name) + ' [EasyFlash].crt')
-            rom, used = conv.build(out, a, fbs, name.upper()[:31])
-            log('  CRT собран, проверяю все загрузки…')
-            ok, msg = conv.verify(rom, a, r, fbs, log=log)
+            files = BF.harvest(r, pr, uniq, log=log)
         except ValueError as ex:
-            ok, msg, out = False, ex.args[0], None
+            rep['verdict'] = '🟡'; rep['why'] += '; не удалось снять файлы: ' + ex.args[0]; return rep
+        boot_fresh = BF.emulate_boot(boot_path)
+        for vi, var in enumerate(variants):
+            try:
+                fbs = [(sid, files[p]) for sid, p, ents in var]
+                res0 = bytes(boot_fresh.boot_ram[0x200:0x400])
+                log('  ищу переходы между сторонами и ожидания дисковода…')
+                logic = BF.find_disk_logic(fbs, res0, pr, log=log)
+                while len(fbs) > 1 and not fbs[-1][1] and logic['trans'].get(len(fbs) - 1) is None:
+                    rep['notes'].append('сторона $%02X пустая и из демки не вызывается — не включена (это отдельный диск)' % fbs[-1][0])
+                    fbs.pop()
+                if vi == 0:
+                    for k in range(1, len(fbs)):
+                        c = logic['trans'].get(k)
+                        if c is None: rep['notes'].append('переход на сторону $%02X в коде не найден' % fbs[k][0])
+                        elif c < 0xf0: rep['notes'].append('переход на сторону $%02X — командой-плагином $%02X (считаю сменой диска)' % (fbs[k][0], c))
+                    if logic['sites']:
+                        rep['notes'].append('обезвреживается ожиданий дисковода: %d (%s)' % (len(logic['sites']), ', '.join('$%04X' % x for x in logic['sites'])))
+                os.makedirs(args.out, exist_ok=True)
+                tag = ''
+                if len(variants) > 1:
+                    alts = [os.path.splitext(bn(p))[0] for sid, p, _ in var if len(byid[sid]) > 1]
+                    tag = ' (' + ', '.join(alts) + ')'
+                out = os.path.join(args.out, re.sub(r'[\\/:*?"<>|]', '_', name + tag) + ' [EasyFlash].crt')
+                rom, used = conv.build(out, a, fbs, (name + tag).upper()[:31], logic)
+                log('  CRT%s собран, проверяю все загрузки…' % tag)
+                ok, msg = conv.verify(rom, a, boot_fresh, fbs, log=log, logic=logic)
+            except ValueError as ex:
+                ok, msg, out = False, ex.args[0], None
+            if ok: crts.append((out, msg))
+            else:
+                fails.append(msg)
+                if out and os.path.exists(out): os.rename(out, out + '.FAILED')
         rep['convert_time'] = round(time.time() - t0)
-        if ok:
-            rep['verdict'] = '✅✅'; rep['why'] += '; CRT собран и проверен (%s)' % msg; rep['crt'] = out
+        rep['notes'] = list(dict.fromkeys(rep['notes']))
+        if crts and not fails:
+            rep['verdict'] = '✅✅'; rep['why'] += '; CRT собран и проверен (%s)' % crts[0][1]; rep['crt'] = [c for c, _ in crts]
+            if len(crts) > 1: rep['notes'].append('собрано CRT: %d' % len(crts))
         else:
-            rep['verdict'] = '🟡'; rep['why'] += '; конвертация не прошла проверку: ' + msg
-            if out and os.path.exists(out): os.rename(out, out + '.FAILED')
+            rep['verdict'] = '🟡'; rep['why'] += '; конвертация не прошла проверку: ' + '; '.join(fails)
     return rep
 
 def main():

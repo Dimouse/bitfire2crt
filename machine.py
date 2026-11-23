@@ -50,6 +50,7 @@ class Machine:
         inp = (1 if data else 0) | (4 if clk else 0) | (0x80 if atn else 0)
         return (d.via1_pb & d.via1_ddrb) | (inp & ~d.via1_ddrb & 0xff)
     def drive_changed(self):
+        self.job_hook = None      # custom drive code talks to the bus: DOS jobs are over
         if self.trace_bus: self.buslog.append(('D', self.t_drive(), self.d.via1_pb, self.d.via1_ddrb))
     def c64_io_read(self, a):
         if a == 0xdd00:
@@ -121,6 +122,9 @@ class Machine:
     def do_job(self, d, slot, v):
         # job for buffer `slot` at track/sector ($06+2*slot,$07+2*slot)
         t = d.ram[6 + 2*slot]; s = d.ram[7 + 2*slot]
+        if v in (0x80, 0xb0):
+            d.halftrack = (t - 1) * 2
+            d.pb = (d.pb & ~3) | (d.halftrack & 3)
         if v == 0x80:
             d.ram[0x300 + slot*0x100: 0x400 + slot*0x100] = d.d64.sec(t, s)
             d.halftrack = (t - 1) * 2

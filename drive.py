@@ -140,7 +140,9 @@ class Drive:
         if 0x1800 <= a < 0x1c00:
             r = a & 15
             if r == 0: self.via1_pb = v; self.bus.drive_changed()
-            elif r == 2: self.via1_ddrb = v; self.bus.drive_changed()
+            elif r == 2:
+                self.via1_ddrb = v; self.bus.drive_changed()
+                self.bus.job_hook = None   # own bus code takes over: ROM job loop is gone
             elif r == 0x0d: self.ifr1 &= ~v
             return
         if 0x1c00 <= a < 0x2000:
